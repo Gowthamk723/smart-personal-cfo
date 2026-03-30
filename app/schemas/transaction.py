@@ -25,3 +25,8 @@ class TransactionRead(TransactionCreate):
     id: str
     user_id: str
     created_at: datetime
+
+
+class UploadResponse(BaseModel):
+    file_path: str
+    raw_text: str
