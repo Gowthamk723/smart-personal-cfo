@@ -64,3 +64,34 @@ def test_description_too_long_raises():
 def test_no_description_is_valid():
     t = TransactionCreate(**_base_data())
     assert t.description is None
+
+
+# UploadResponse schema tests — Requirements 7.2, 7.4
+from app.schemas.transaction import UploadResponse
+
+
+def test_upload_response_new_fields_default_to_none():
+    resp = UploadResponse(file_path="x", raw_text="y")
+    assert resp.merchant is None
+    assert resp.date is None
+    assert resp.amount is None
+    assert resp.category is None
+
+
+def test_upload_response_none_fields_serialise_as_null():
+    resp = UploadResponse(file_path="x", raw_text="y")
+    data = resp.model_dump()
+    assert data["merchant"] is None
+    assert data["date"] is None
+    assert data["amount"] is None
+    assert data["category"] is None
+
+
+def test_upload_response_none_fields_as_null_in_json():
+    import json
+    resp = UploadResponse(file_path="x", raw_text="y")
+    parsed = json.loads(resp.model_dump_json())
+    assert parsed["merchant"] is None
+    assert parsed["date"] is None
+    assert parsed["amount"] is None
+    assert parsed["category"] is None

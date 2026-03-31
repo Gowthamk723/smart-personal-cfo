@@ -69,16 +69,21 @@ MINIMAL_PNG = _make_png()
 
 @pytest.mark.asyncio
 async def test_upload_valid_jpeg_returns_200(client_connected):
-    """Valid JPEG upload → HTTP 200 with file_path and raw_text keys."""
-    with patch("app.routers.transactions.extract_text", return_value="some text"):
+    """Valid JPEG upload → HTTP 200 with all six response fields."""
+    with patch("app.routers.transactions.extract_text", return_value="Starbucks\n2024-01-15\nTotal £4.50\ncoffee"):
         response = await client_connected.post(
             "/transactions/upload/",
             files={"file": ("receipt.jpg", io.BytesIO(MINIMAL_JPEG), "image/jpeg")},
         )
     assert response.status_code == 200
     body = response.json()
+    # All six fields must be present
     assert "file_path" in body
     assert "raw_text" in body
+    assert "merchant" in body
+    assert "date" in body
+    assert "amount" in body
+    assert "category" in body
     assert isinstance(body["file_path"], str)
     assert isinstance(body["raw_text"], str)
 
@@ -95,14 +100,19 @@ async def test_upload_txt_file_returns_400(client_connected):
 
 @pytest.mark.asyncio
 async def test_upload_blank_image_returns_200_empty_raw_text(client_connected):
-    """Blank image with mocked extract_text returning '' → HTTP 200, raw_text == ''."""
+    """Blank image with mocked extract_text returning '' → HTTP 200, raw_text == '', parsed fields null."""
     with patch("app.routers.transactions.extract_text", return_value=""):
         response = await client_connected.post(
             "/transactions/upload/",
             files={"file": ("blank.jpg", io.BytesIO(MINIMAL_JPEG), "image/jpeg")},
         )
     assert response.status_code == 200
-    assert response.json()["raw_text"] == ""
+    body = response.json()
+    assert body["raw_text"] == ""
+    assert body["merchant"] is None
+    assert body["date"] is None
+    assert body["amount"] is None
+    assert body["category"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +218,40 @@ async def test_property_4_unique_filenames(client_connected):
             paths.append(response.json()["file_path"])
 
     assert len(paths) == len(set(paths)), "Duplicate file paths detected across uploads"
+
+
+# ---------------------------------------------------------------------------
+# Property 7: Upload endpoint always returns HTTP 200 with all six response fields
+# Feature: smart-personal-cfo, Property 7: Upload endpoint always returns HTTP 200 with all six response fields for valid images
+# Validates: Requirements 6.1, 6.2, 6.4, 7.1
+# ---------------------------------------------------------------------------
+
+_SIX_FIELDS = {"file_path", "raw_text", "merchant", "date", "amount", "category"}
+
+
+@pytest.mark.asyncio
+@settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(ext_and_mime=st.sampled_from([(".jpg", "image/jpeg"), (".png", "image/png")]))
+async def test_property_7_upload_returns_all_six_fields(ext_and_mime, client_connected):
+    """Property 7: Valid JPEG/PNG upload → HTTP 200 and all six fields present in response JSON."""
+    ext, mime = ext_and_mime
+    img_bytes = MINIMAL_JPEG if mime == "image/jpeg" else MINIMAL_PNG
+
+    with patch("app.routers.transactions.extract_text", return_value=""):
+        response = await client_connected.post(
+            "/transactions/upload/",
+            files={"file": (f"receipt{ext}", io.BytesIO(img_bytes), mime)},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert _SIX_FIELDS.issubset(body.keys()), (
+        f"Missing fields: {_SIX_FIELDS - body.keys()}"
+    )
+    # file_path and raw_text must be strings
+    assert isinstance(body["file_path"], str)
+    assert isinstance(body["raw_text"], str)
+    # parsed fields must be str or null
+    for field in ("merchant", "date", "amount", "category"):
+        assert body[field] is None or isinstance(body[field], str), (
+            f"Field '{field}' has unexpected type: {type(body[field])}"
+        )

@@ -30,3 +30,7 @@ class TransactionRead(TransactionCreate):
 class UploadResponse(BaseModel):
     file_path: str
     raw_text: str
+    merchant: str | None = None
+    date: str | None = None
+    amount: str | None = None
+    category: str | None = None

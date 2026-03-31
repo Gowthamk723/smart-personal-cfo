@@ -5,6 +5,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.schemas.transaction import UploadResponse
 from app.services.ocr import extract_text
+from app.services.parser import parse_receipt
 
 router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
@@ -26,4 +27,12 @@ async def upload_transaction_image(file: UploadFile = File(...)) -> UploadRespon
     file_path.write_bytes(contents)
 
     raw_text = extract_text(str(file_path))
-    return UploadResponse(file_path=str(file_path), raw_text=raw_text)
+    parsed = parse_receipt(raw_text)
+    return UploadResponse(
+        file_path=str(file_path),
+        raw_text=raw_text,
+        merchant=parsed.merchant_name,
+        date=parsed.date,
+        amount=parsed.amount,
+        category=parsed.category,
+    )
