@@ -1,7 +1,8 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, field_serializer, model_validator
+from pydantic.config import ConfigDict
 
 from app.schemas import FinancialType
 
@@ -20,11 +21,23 @@ class TransactionCreate(BaseModel):
             raise ValueError("amount must be greater than 0")
         return v
 
+    @field_serializer("amount")
+    def serialise_amount(self, v: Decimal) -> float:
+        return float(v)
+
 
 class TransactionRead(TransactionCreate):
-    id: str
-    user_id: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(validation_alias="_id")
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_id(cls, data: dict) -> dict:
+        if "_id" in data and not isinstance(data["_id"], str):
+            data["_id"] = str(data["_id"])
+        return data
 
 
 class UploadResponse(BaseModel):

@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.schemas.transaction import UploadResponse
+from app.db.connection import get_db
+from app.schemas.transaction import TransactionCreate, TransactionRead, UploadResponse
 from app.services.ocr import extract_text
 from app.services.parser import parse_receipt
 
@@ -11,6 +14,30 @@ router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png"}
 UPLOADS_DIR = Path("uploads")
+
+
+@router.post("/", response_model=TransactionRead, status_code=201)
+async def save_transaction(
+    payload: TransactionCreate,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> TransactionRead:
+    doc = payload.model_dump()
+    doc["created_at"] = datetime.now(timezone.utc)
+    try:
+        result = await db["transactions"].insert_one(doc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Database insertion failed: {exc}") from exc
+    doc["_id"] = result.inserted_id
+    return TransactionRead.model_validate(doc)
+
+
+@router.get("/", response_model=list[TransactionRead])
+async def list_transactions(
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> list[TransactionRead]:
+    cursor = db["transactions"].find()
+    docs = await cursor.to_list(length=None)
+    return [TransactionRead.model_validate(doc) for doc in docs]
 
 
 @router.post("/upload/", response_model=UploadResponse)

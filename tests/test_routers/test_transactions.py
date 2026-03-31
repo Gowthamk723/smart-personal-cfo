@@ -2,6 +2,7 @@
 import io
 import struct
 import zlib
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -255,3 +256,228 @@ async def test_property_7_upload_returns_all_six_fields(ext_and_mime, client_con
         assert body[field] is None or isinstance(body[field], str), (
             f"Field '{field}' has unexpected type: {type(body[field])}"
         )
+
+
+# ===========================================================================
+# Phase 4 — POST /transactions/ unit tests (Task 2.1)
+# ===========================================================================
+
+VALID_PAYLOAD = {
+    "amount": "12.50",
+    "type": "expense",
+    "category_id": "groceries",
+    "date": "2024-06-01T00:00:00Z",
+    "description": "Weekly shop",
+}
+
+
+@pytest.mark.asyncio
+async def test_post_transaction_valid_payload_returns_201(real_client):
+    """Valid payload → HTTP 201, id is a non-empty string, fields match."""
+    response = await real_client.post("/transactions/", json=VALID_PAYLOAD)
+    assert response.status_code == 201
+    body = response.json()
+    assert isinstance(body["id"], str) and body["id"]
+    assert float(body["amount"]) == float(VALID_PAYLOAD["amount"])
+    assert body["type"] == VALID_PAYLOAD["type"]
+    assert body["category_id"] == VALID_PAYLOAD["category_id"]
+    assert body["description"] == VALID_PAYLOAD["description"]
+    assert "created_at" in body
+
+
+@pytest.mark.asyncio
+async def test_post_transaction_missing_required_field_returns_422(real_client):
+    """Missing required field (amount) → HTTP 422."""
+    payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "amount"}
+    response = await real_client.post("/transactions/", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_post_transaction_amount_zero_returns_422(real_client):
+    """amount = 0 → HTTP 422."""
+    response = await real_client.post("/transactions/", json={**VALID_PAYLOAD, "amount": "0"})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_post_transaction_amount_negative_returns_422(real_client):
+    """amount = -1.00 → HTTP 422."""
+    response = await real_client.post("/transactions/", json={**VALID_PAYLOAD, "amount": "-1.00"})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_post_transaction_db_failure_returns_500(real_client):
+    """Mocked insert_one raising Exception → HTTP 500."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    mock_collection = MagicMock()
+    mock_collection.insert_one = AsyncMock(side_effect=Exception("DB down"))
+
+    with patch("app.routers.transactions.get_db") as _:
+        # Override the db dependency to return a mock that raises on insert_one
+        async def failing_db():
+            db = MagicMock()
+            db.__getitem__ = MagicMock(return_value=mock_collection)
+            yield db
+
+        from main import app
+        from app.db.connection import get_db
+        app.dependency_overrides[get_db] = failing_db
+        try:
+            response = await real_client.post("/transactions/", json=VALID_PAYLOAD)
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 500
+
+
+# ===========================================================================
+# Phase 4 — Property 1 (part A): Save endpoint round-trip (Task 2.2)
+# Feature: smart-personal-cfo, Property 1: Save endpoint round-trip — insert then retrieve
+# Validates: Requirements 1.2, 1.3
+# ===========================================================================
+
+from decimal import Decimal
+from hypothesis import HealthCheck, given, settings as h_settings
+from hypothesis import strategies as st
+
+_financial_type = st.sampled_from(["income", "expense"])
+_category_id = st.text(min_size=1, max_size=50, alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd"), whitelist_characters="_-"))
+_description = st.one_of(st.none(), st.text(max_size=200))
+_amount = st.decimals(min_value="0.01", max_value="999999.99", allow_nan=False, allow_infinity=False, places=2)
+_date = st.datetimes(min_value=datetime(2000, 1, 1), max_value=datetime(2099, 12, 31)).map(lambda d: d.isoformat() + "Z")
+
+_transaction_strategy = st.fixed_dictionaries({
+    "amount": _amount.map(lambda d: str(d)),
+    "type": _financial_type,
+    "category_id": _category_id,
+    "date": _date,
+    "description": _description,
+})
+
+
+@pytest.mark.asyncio
+@h_settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
+@given(payload=_transaction_strategy)
+async def test_property_1a_save_endpoint_round_trip(payload, real_client):
+    """Property 1 (part A): POST valid TransactionCreate → HTTP 201, id is non-empty string, fields match."""
+    response = await real_client.post("/transactions/", json=payload)
+    assert response.status_code == 201
+    body = response.json()
+    assert isinstance(body.get("id"), str) and body["id"]
+    assert float(body["amount"]) == pytest.approx(float(payload["amount"]))
+    assert body["type"] == payload["type"]
+    assert body["category_id"] == payload["category_id"]
+    assert body["description"] == payload["description"]
+
+
+# ===========================================================================
+# Phase 4 — GET /transactions/ unit tests (Task 4.1)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_transactions_empty_collection_returns_200_empty_list(real_client):
+    """Empty collection → HTTP 200, body []."""
+    response = await real_client.get("/transactions/")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_get_transactions_after_inserting_3_returns_list_of_3(real_client):
+    """After inserting 3 transactions → HTTP 200, list length 3, each item has a string id."""
+    for _ in range(3):
+        await real_client.post("/transactions/", json=VALID_PAYLOAD)
+
+    response = await real_client.get("/transactions/")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 3
+    for item in body:
+        assert isinstance(item["id"], str) and item["id"]
+
+
+@pytest.mark.asyncio
+async def test_get_transactions_no_raw_id_key_in_response(real_client):
+    """No item in the response contains a raw _id key."""
+    await real_client.post("/transactions/", json=VALID_PAYLOAD)
+
+    response = await real_client.get("/transactions/")
+    assert response.status_code == 200
+    for item in response.json():
+        assert "_id" not in item
+
+
+# ===========================================================================
+# Phase 4 — Property 5: Empty collection returns empty list (Task 4.2)
+# Feature: smart-personal-cfo, Property 5: Empty collection returns empty list
+# Validates: Requirements 2.3
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@h_settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
+@given(st.just(None))
+async def test_property_5_empty_collection_returns_empty_list(_, real_client):
+    """Property 5: Empty collection → GET /transactions/ returns HTTP 200 and body == []."""
+    # real_client fixture cleans up after each test, so collection is empty here
+    response = await real_client.get("/transactions/")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+# ===========================================================================
+# Phase 4 — Property 2: _id to id mapping for all retrieved documents (Task 4.3)
+# Feature: smart-personal-cfo, Property 2: _id to id mapping for all retrieved documents
+# Validates: Requirements 2.4, 4.3
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@h_settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
+@given(payloads=st.lists(_transaction_strategy, min_size=1, max_size=5))
+async def test_property_2_id_mapping_for_all_retrieved_documents(payloads, real_client):
+    """Property 2: Insert N random transactions via POST; GET /transactions/; every item has non-empty string id and no _id key."""
+    for payload in payloads:
+        post_resp = await real_client.post("/transactions/", json=payload)
+        assert post_resp.status_code == 201
+
+    response = await real_client.get("/transactions/")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) >= len(payloads)
+    for item in body:
+        assert isinstance(item.get("id"), str) and item["id"], f"id missing or empty: {item}"
+        assert "_id" not in item, f"raw _id exposed: {item}"
+
+
+# ===========================================================================
+# Phase 4 — Property 1 (part B): Full round-trip list verification (Task 4.4)
+# Feature: smart-personal-cfo, Property 1: Save endpoint round-trip — insert then retrieve (list verification)
+# Validates: Requirements 2.2, 2.4
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@h_settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
+@given(payload=_transaction_strategy)
+async def test_property_1b_full_round_trip_list_verification(payload, real_client):
+    """Property 1 (part B): POST a transaction, then GET /transactions/ and assert the list contains it with matching fields."""
+    post_resp = await real_client.post("/transactions/", json=payload)
+    assert post_resp.status_code == 201
+    inserted_id = post_resp.json()["id"]
+
+    get_resp = await real_client.get("/transactions/")
+    assert get_resp.status_code == 200
+    items = get_resp.json()
+
+    matching = [item for item in items if item["id"] == inserted_id]
+    assert len(matching) == 1, f"Expected exactly 1 item with id={inserted_id}, got {len(matching)}"
+    item = matching[0]
+    assert pytest.approx(float(item["amount"])) == float(payload["amount"])
+    assert item["type"] == payload["type"]
+    assert item["category_id"] == payload["category_id"]
+    assert item["description"] == payload["description"]

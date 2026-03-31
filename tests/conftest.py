@@ -1,9 +1,11 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from main import app
 from app.db.connection import get_db
+from app.config import settings
 
 
 @pytest.fixture
@@ -39,6 +41,36 @@ async def client_disconnected(mock_db_disconnected):
     """Async test client with a disconnected mock DB."""
     async def override_get_db():
         yield mock_db_disconnected
+
+    app.dependency_overrides[get_db] = override_get_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Real test-database fixtures (Phase 4)
+# ---------------------------------------------------------------------------
+
+TEST_DB_NAME = "smart_personal_cfo_test"
+
+
+@pytest.fixture
+async def test_db():
+    """Yield a real Motor database handle pointing at the test DB."""
+    client = AsyncIOMotorClient(settings.MONGODB_URI)
+    db = client[TEST_DB_NAME]
+    yield db
+    # Clean up all documents inserted during the test
+    await db["transactions"].delete_many({})
+    client.close()
+
+
+@pytest.fixture
+async def real_client(test_db):
+    """Async test client wired to the real test MongoDB database."""
+    async def override_get_db():
+        yield test_db
 
     app.dependency_overrides[get_db] = override_get_db
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
